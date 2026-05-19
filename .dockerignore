@@ -1,0 +1,28 @@
+# Ignore virtual environments
+venv/
+.venv/
+env/
+
+# Ignore local sqlite databases to prevent overwriting cloud databases
+*.db
+*.sqlite3
+
+# Ignore Python caches and compilation artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ignore IDE settings
+.vscode/
+.idea/
+.DS_Store
+
+# Ignore git logs and local scratchpad directories
+.git/
+.gitignore
+scratch/
+test_*.py

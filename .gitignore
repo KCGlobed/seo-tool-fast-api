@@ -1,0 +1,18 @@
+# Ignore all Google service account keys
+seo-tool-*.json
+*.json
+
+# Ignore local sqlite databases
+*.db
+*.sqlite3
+
+# Ignore virtual environments
+venv/
+.venv/
+env/
+
+# Ignore Python cache and compiler files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
