@@ -75,16 +75,13 @@ init_db()
 class RankSource(str, Enum):
     scraper = "scraper"
     mock = "mock"
-    gsc = "gsc"
 
 class RankCheckRequest(BaseModel):
     domain: str = Field(..., example="example.com", description="The target website domain to search for")
     keyword: str = Field(..., example="cloud hosting solutions", description="The search term to query on Google")
     depth: int = Field(50, ge=10, le=100, description="The depth of search results to scan (e.g., top 10 to 100)")
     use_mock: bool = Field(False, description="Simulate Google rankings. Highly useful for frontend testing and avoiding search blockages")
-    source: RankSource = Field(RankSource.scraper, description="Ranking source to use: 'scraper', 'mock', or 'gsc'")
-    gsc_credentials_path: Optional[str] = Field("seo-tool-496811-52289d0c0e56.json", description="Local path to Google Service Account JSON Key file")
-    gsc_property_url: Optional[str] = Field(None, description="Exact Search Console property URL (e.g., 'https://www.example.com/' or 'sc-domain:example.com'). If null, defaults to normal domain format.")
+    source: RankSource = Field(RankSource.scraper, description="Ranking source to use: 'scraper' or 'mock'")
 
 class RankCheckResponse(BaseModel):
     id: Optional[int] = None
@@ -214,135 +211,7 @@ def domain_matches(target_domain: str, result_url: str) -> bool:
     except Exception:
         return False
 
-async def get_gsc_rank_position(
-    credentials_path: str,
-    domain: str,
-    keyword: str,
-    gsc_property_url: Optional[str] = None,
-    days_back: int = 3
-) -> dict:
-    """
-    Queries Google Search Console Search Analytics API server-to-server to fetch average position, clicks, impressions, and CTR.
-    """
-    try:
-        from google.oauth2 import service_account
-        import google.auth.transport.requests
-        import google.auth
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="Google authorization libraries are not installed in the active Python environment. "
-                   "Please run: source venv/bin/activate && pip install -r requirements.txt"
-        )
 
-    # Normalize GSC Property URL
-    property_url = gsc_property_url
-    if not property_url:
-        # Standard GSC domain property format
-        property_url = f"sc-domain:{normalize_domain(domain)}"
-        logger.info("GSC: Auto-normalizing domain '%s' to property URL '%s'", domain, property_url)
-    else:
-        property_url = property_url.strip()
-
-    try:
-        # 1. Load service account credentials (local key file or keyless Application Default Credentials)
-        scopes = ["https://www.googleapis.com/auth/webmasters.readonly"]
-        
-        if credentials_path and os.path.exists(credentials_path):
-            creds = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=scopes
-            )
-            logger.info("GSC: Authenticated using local service account JSON key: %s", credentials_path)
-        else:
-            # Check if running inside Google Cloud Platform (e.g. Cloud Run) or if local ADC environment variable is defined
-            is_gcp_or_adc = os.getenv("K_SERVICE") is not None or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") is not None
-            
-            if is_gcp_or_adc:
-                logger.info("GSC: Local key file not found. Falling back to Application Default Credentials (ADC)...")
-                try:
-                    creds, project_id = google.auth.default(scopes=scopes)
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Google Search Console credentials not found. Local JSON file at '{credentials_path}' "
-                               f"does not exist, and Application Default Credentials (ADC) failed: {str(e)}."
-                    )
-            else:
-                # Local environment with no JSON file and no ADC environment variables configured
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Google Search Console credentials JSON file not found at '{credentials_path}'. "
-                           f"For local development, please place your Service Account JSON key at this path."
-                )
-        
-        # 2. Refresh credentials to get access token (no browser redirect required!)
-        auth_request = google.auth.transport.requests.Request()
-        creds.refresh(auth_request)
-        
-        # 3. Calculate query date range (GSC has ~2-3 days data processing latency)
-        end_date = datetime.utcnow().strftime("%Y-%m-%d")
-        start_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        
-        # Encode property URL for standard REST query path
-        encoded_property = urllib.parse.quote_plus(property_url)
-        gsc_api_url = f"https://www.googleapis.com/webmasters/v3/sites/{encoded_property}/searchAnalytics/query"
-        
-        headers = {
-            "Authorization": f"Bearer {creds.token}",
-            "Content-Type": "application/json"
-        }
-        
-        request_body = {
-            "startDate": start_date,
-            "endDate": end_date,
-            "dimensions": ["query"],
-            "dimensionFilterGroups": [
-                {
-                    "filters": [
-                        {
-                            "dimension": "query",
-                            "operator": "equals",
-                            "expression": keyword
-                        }
-                    ]
-                }
-            ],
-            "rowLimit": 1
-        }
-        
-        logger.info("GSC API Request: Querying %s for query '%s'", gsc_api_url, keyword)
-        
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(gsc_api_url, json=request_body, headers=headers)
-            
-            if response.status_code == 403:
-                # Handle common permissions issues gracefully
-                error_info = response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
-                logger.error("GSC 403 Permission Denied: %s", error_info)
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Google Search Console permissions error for property '{property_url}'. "
-                           f"Ensure your Service Account email ({creds.service_account_email}) "
-                           f"has been added as a Viewer or Owner in your Google Search Console settings."
-                )
-                
-            if response.status_code != 200:
-                logger.error("GSC API error %d: %s", response.status_code, response.text)
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Google Search Console API error: {response.text}"
-                )
-                
-            return response.json()
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Unexpected error authenticating or querying GSC: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to query Google Search Console: {str(e)}"
-        )
 
 # --- CORE API ROUTINGS ---
 
@@ -395,35 +264,6 @@ async def check_keyword_rank(payload: RankCheckRequest):
             ctr = round((clicks / impressions) * 100, 2) if impressions > 0 else 0.0
 
         logger.info("Mock rank computed: rank=%d for keyword='%s' and domain='%s'", final_rank, keyword, domain)
-
-    elif source == RankSource.gsc:
-        # GOOGLE SEARCH CONSOLE API FLOW (Server-to-Server, Non-Interactive)
-        gsc_data = await get_gsc_rank_position(
-            credentials_path=payload.gsc_credentials_path,
-            domain=domain,
-            keyword=keyword,
-            gsc_property_url=payload.gsc_property_url
-        )
-        
-        rows = gsc_data.get("rows", [])
-        if rows:
-            first_row = rows[0]
-            raw_position = first_row.get("position", 0.0)
-            # GSC average position can be a float. Round to nearest integer.
-            final_rank = int(round(raw_position))
-            clicks = int(first_row.get("clicks", 0))
-            impressions = int(first_row.get("impressions", 0))
-            # Convert decimal ratio (e.g. 0.053) to percentage (e.g. 5.3)
-            ctr = round(float(first_row.get("ctr", 0.0)) * 100, 2)
-            matched_url = f"https://{normalize_domain(domain)}"
-            matched_title = "Google Search Console Performance Report"
-            
-            logger.info("GSC rank fetched successfully: position=%.2f, clicks=%d, impressions=%d", raw_position, clicks, impressions)
-        else:
-            final_rank = 0
-            matched_url = None
-            matched_title = None
-            logger.info("GSC fetched empty performance data for query '%s' on domain '%s'", keyword, domain)
 
     else:
         # REAL SEARCH SCRAPING FLOW
